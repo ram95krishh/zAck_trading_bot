@@ -20,6 +20,6 @@ PyYAML==6.0.1
 
 #Persistence and API
 SQLAlchemy==2.0.30
-psycopg[binary]==3.1.18
+psycopg[binary]==3.2.9
 fastapi==0.111.0
 uvicorn==0.29.0
