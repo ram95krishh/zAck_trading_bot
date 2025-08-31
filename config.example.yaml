@@ -1,0 +1,25 @@
+zerodha:
+  api_key: "YOUR_KITE_API_KEY"
+  api_secret: "YOUR_KITE_API_SECRET"
+  access_token: ""
+
+openai:
+  api_key: "YOUR_OPENAI_API_KEY"
+
+news_api:
+  api_key: "YOUR_NEWSAPI_API_KEY"
+
+trading_flags:
+  underlying_instrument: "NIFTY 50"
+  chart_timeframe: "5minute"
+  product_type: "MIS"
+  order_variety: "REGULAR"
+  risk_per_trade_percent: 1.0
+  stop_loss_percent: 15.0
+  max_trades_per_day: 5
+  paper_trading: true
+  enable_ai_loss_analysis: true
+  enable_natural_language_prompt: true
+  strategy_reassessment_period_minutes: 60
+  use_rag: false
+  rag_min_trading_days: 5

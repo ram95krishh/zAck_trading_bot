@@ -12,10 +12,12 @@ from langgraph_agent import LangGraphAgent
 from strategy_factory import get_strategy
 from backtester import run_backtest
 from reporting import send_daily_report, initialize_trade_log, log_trade, send_monthly_report
+from database import sync_holdings
 from indicators import calculate_cpr, is_trend_overextended, check_momentum_divergence
 from indicator_calculator import calculate_all_indicators
 from market_context import MarketConditionIdentifier
 from rag_service import RAGService
+from openai import AsyncOpenAI
 import multiprocessing
 import warnings
 
@@ -42,6 +44,7 @@ class TradingBotOrchestrator:
         self.rag_service = RAGService(config)
         self.langgraph_agent = LangGraphAgent(config, self.rag_service)
         self.sentiment_agent = SentimentAgent(config)
+        self.openai_client = AsyncOpenAI(api_key=config.get('openai', {}).get('api_key'))
         
         self.market_condition_identifier = None
         self.order_agent = None
@@ -54,6 +57,7 @@ class TradingBotOrchestrator:
         self.last_processed_timestamp = None
         self.last_divergence_warning = ""
         self.awaiting_signal_since = None
+        self.is_paper_trading = self.config['trading_flags'].get('paper_trading', True)
 
     def authenticate(self):
         logging.info("Attempting fresh authentication...")
@@ -75,6 +79,9 @@ class TradingBotOrchestrator:
             self.order_agent = OrderExecutionAgent(self.kite, self.config)
             self.position_agent = PositionManagementAgent(self.kite, self.config, self.rag_service)
             logging.info("Agents initialized successfully.")
+
+            sync_holdings(self.kite)
+            initialize_trade_log()
             
             return True
         except Exception as e:
@@ -146,9 +153,7 @@ class TradingBotOrchestrator:
             
             self.active_strategy_name = best_strategy_name
             self.active_strategy = get_strategy(best_strategy_name, self.kite, self.config)
-            
-            initialize_trade_log()
-            
+
             token = self.order_agent.underlying_token
             hist = await asyncio.to_thread(self.kite.historical_data, token, today - datetime.timedelta(days=7), today, "day")
             prev_day_data = pd.DataFrame(hist).iloc[-2:-1]
@@ -221,7 +226,7 @@ class TradingBotOrchestrator:
             send_daily_report(self.config, str(datetime.date.today()), no_trades_reason=self.no_trade_reason)
             return
 
-        is_paper = self.config['trading_flags']['paper_trading']
+        is_paper = self.is_paper_trading
         logging.info(f"Bot running in {'PAPER TRADING' if is_paper else 'LIVE TRADING'} mode.")
 
         while self.is_market_open(): # Changed loop condition to re-check market status
@@ -276,9 +281,15 @@ class TradingBotOrchestrator:
                     underlying_df_hist['date'] = pd.to_datetime(underlying_df_hist['date'])
                     underlying_df_hist.set_index('date', inplace=True)
                     underlying_df = calculate_all_indicators(underlying_df_hist, self.config)
-                    status = await self.position_agent.manage(is_paper, underlying_hist_df=underlying_df, sentiment_agent=self.sentiment_agent, gemini_api_key=self.config.get('google_api', {}).get('api_key'))
+                    status = await self.position_agent.manage(
+                        is_paper,
+                        underlying_hist_df=underlying_df,
+                        sentiment_agent=self.sentiment_agent,
+                        openai_client=self.openai_client,
+                    )
                     if status and status != 'ACTIVE':
                         log_trade(status)
+                        sync_holdings(self.kite)
                         self.bot_state = "AWAITING_SIGNAL"
                         self.awaiting_signal_since = datetime.datetime.now()
 

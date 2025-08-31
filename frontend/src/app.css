@@ -1,0 +1,24 @@
+body {
+  font-family: Arial, sans-serif;
+  margin: 0;
+  padding: 0;
+}
+nav {
+  display: flex;
+  gap: 1rem;
+  background: #282c34;
+  padding: 1rem;
+}
+nav button {
+  background: #61dafb;
+  border: none;
+  padding: 0.5rem 1rem;
+  cursor: pointer;
+}
+nav button:hover {
+  background: #21a1f1;
+}
+
+h2 {
+  margin-top: 1rem;
+}

@@ -28,11 +28,11 @@ class BaseStrategy:
         """Returns a human-readable status message."""
         return "Awaiting signal: Generic strategy waiting for conditions."
 
-class Gemini_Default_Strategy(BaseStrategy):
-    """The original Gemini strategy based on CPR, EMA, and RSI."""
+class OpenAI_Default_Strategy(BaseStrategy):
+    """The original default strategy based on CPR, EMA, and RSI."""
     def __init__(self, kite, config):
         super().__init__(kite, config)
-        self.name = "Gemini_Default"
+        self.name = "OpenAI_Default"
 
     def generate_signals(self, day_df, sentiment, index=None, **kwargs):
         if index is None: index = len(day_df) - 1
@@ -476,7 +476,7 @@ class Reversal_Detector_Strategy(BaseStrategy):
 def get_strategy(name, kite, config):
     """Factory function to get a strategy instance by name."""
     strategies = {
-        "Gemini_Default": Gemini_Default_Strategy, 
+        "OpenAI_Default": OpenAI_Default_Strategy,
         "Supertrend_MACD": Supertrend_MACD_Strategy,
         "Volatility_Cluster_Reversal": VolatilityClusterStrategy,
         "Volume_Spread_Analysis": VSA_Strategy, 

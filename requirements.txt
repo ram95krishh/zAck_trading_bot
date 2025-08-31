@@ -1,13 +1,12 @@
 #Core Trading and API Interaction
-kiteconnect==4.0.0
+kiteconnect==4.2.0
 pandas==2.2.2
 numpy==1.26.4
 pandas-ta==0.3.14b
 TA-Lib==0.4.28
-openpyxl==3.1.2
 
 #AI and Sentiment Analysis
-google-generativeai==0.7.1
+openai>=1.0.0
 newsapi-python==0.2.7
 textblob==0.18.0.post0
 
@@ -18,3 +17,9 @@ beautifulsoup4==4.12.3
 
 #Configuration
 PyYAML==6.0.1
+
+#Persistence and API
+SQLAlchemy==2.0.30
+psycopg[binary]==3.1.18
+fastapi==0.111.0
+uvicorn==0.29.0
