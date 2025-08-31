@@ -6,7 +6,14 @@ This guide explains how to configure both the trading engine and the accompanyin
 - Python 3.9+
 - Node.js 18+
 - PostgreSQL running locally or remotely
-- TA-Lib system libraries (`apt-get install -y ta-lib-dev` on Debian/Ubuntu)
+- *(Optional)* TA-Lib system libraries if you prefer the native TA-Lib implementation for indicators
+
+### Installing TA-Lib (optional)
+- **macOS (Homebrew):** `brew install ta-lib`
+- **Debian/Ubuntu:** `sudo apt-get install ta-lib`
+- **RHEL/CentOS:** `sudo yum install ta-lib`
+
+If TA-Lib is not installed, the project automatically falls back to [`pandas-ta`](https://github.com/twopirllc/pandas-ta) for indicator calculations.
 
 ## Python Backend
 1. Clone the repository and create a virtual environment:
@@ -17,8 +24,12 @@ This guide explains how to configure both the trading engine and the accompanyin
    source trade_bot/bin/activate
    ```
 2. Install dependencies:
+    ```bash
+    pip install -r requirements.txt
+    ```
+   To enable the optional TA-Lib backend after installing the system libraries, run:
    ```bash
-   pip install -r requirements.txt
+   pip install TA-Lib
    ```
 3. Provide a `config.yaml` in the project root. Use `config.example.yaml` as a template for API keys and trading flags.
 4. Initialize the database (PostgreSQL connection is configured via `DATABASE_URL` and uses the psycopg v3 driver, e.g. `postgresql+psycopg://user:pass@host/db`):

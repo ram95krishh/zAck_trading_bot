@@ -1,6 +1,12 @@
 import pandas as pd
 import numpy as np
-import talib
+
+try:
+    import talib
+    _HAS_TALIB = True
+except ModuleNotFoundError:  # pragma: no cover - optional dependency
+    import pandas_ta as ta
+    _HAS_TALIB = False
 
 def calculate_cpr(df_prev_day):
     """Calculates Central Pivot Range (CPR) and standard pivots."""
@@ -25,11 +31,18 @@ def calculate_cpr(df_prev_day):
 
 def calculate_ema(prices, period):
     """Calculates the Exponential Moving Average (EMA)."""
-    return talib.EMA(prices, timeperiod=period)
+    series = pd.Series(prices)
+    if _HAS_TALIB:
+        return talib.EMA(series, timeperiod=period)
+    # pandas-ta returns a Series aligned to the input
+    return ta.ema(series, length=period)
 
 def calculate_rsi(prices, period=14):
     """Calculates the Relative Strength Index (RSI)."""
-    return talib.RSI(prices, timeperiod=period)
+    series = pd.Series(prices)
+    if _HAS_TALIB:
+        return talib.RSI(series, timeperiod=period)
+    return ta.rsi(series, length=period)
 
 def check_ema_crossover(df, current_candle, last_candle, period):
     """Checks for a bullish or bearish EMA crossover for two consecutive candles."""

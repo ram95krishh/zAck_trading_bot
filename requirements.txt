@@ -3,7 +3,8 @@ kiteconnect==4.2.0
 pandas==2.2.2
 numpy==1.26.4
 pandas-ta==0.3.14b
-TA-Lib==0.4.28
+# Optional: TA-Lib provides faster indicators but requires system libraries
+# TA-Lib==0.4.28
 
 #AI and Sentiment Analysis
 openai>=1.0.0
