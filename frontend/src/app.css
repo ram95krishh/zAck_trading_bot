@@ -1,24 +1,109 @@
+:root {
+  --font-family: 'Share Tech Mono', monospace;
+  --color-bg: #f9fafb;
+  --color-text: #111827;
+  --color-accent: #0ea5e9;
+  --color-card-bg: #ffffff;
+  --color-row-alt: #f1f5f9;
+  --color-profit: #16a34a;
+  --color-loss: #dc2626;
+}
+
+html.dark {
+  --color-bg: #0f172a;
+  --color-text: #f1f5f9;
+  --color-accent: #38bdf8;
+  --color-card-bg: #1e293b;
+  --color-row-alt: #334155;
+}
+
 body {
-  font-family: Arial, sans-serif;
+  font-family: var(--font-family);
+  background: var(--color-bg);
+  color: var(--color-text);
   margin: 0;
-  padding: 0;
 }
-nav {
+
+.navbar {
   display: flex;
-  gap: 1rem;
-  background: #282c34;
-  padding: 1rem;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  background: var(--color-card-bg);
+  padding: 0.5rem 1rem;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
 }
-nav button {
-  background: #61dafb;
+
+.nav-buttons {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.nav-buttons button {
+  background: var(--color-accent);
+  color: #fff;
   border: none;
   padding: 0.5rem 1rem;
   cursor: pointer;
-}
-nav button:hover {
-  background: #21a1f1;
+  border-radius: 4px;
+  flex: 1 0 auto;
 }
 
-h2 {
-  margin-top: 1rem;
+.nav-buttons button.active {
+  opacity: 0.8;
+}
+
+.theme-toggle {
+  background: none;
+  border: 1px solid var(--color-accent);
+  color: var(--color-accent);
+  padding: 0.5rem 1rem;
+  border-radius: 4px;
+  cursor: pointer;
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.card {
+  background: var(--color-card-bg);
+  border-radius: 8px;
+  padding: 1rem;
+  margin: 1rem 0;
+  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
+}
+
+.table-wrapper {
+  overflow-x: auto;
+}
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+th, td {
+  padding: 0.5rem;
+  text-align: left;
+}
+
+tbody tr:nth-child(odd) {
+  background: var(--color-row-alt);
+}
+
+.totals {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+
+@media (max-width: 600px) {
+  .nav-buttons button {
+    flex: 1 0 48%;
+  }
 }
