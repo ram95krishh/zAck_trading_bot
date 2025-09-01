@@ -1,6 +1,9 @@
 # zAck Trading Bot 3.0: An AI-Powered Algorithmic Trading System
 
-zAck Trading Bot is a sophisticated, event-driven, and modular algorithmic trading application designed for the Indian stock market (NIFTY 50). It leverages modern AI, including Large Language Models (LLMs) and Retrieval-Augmented Generation (RAG), to make intelligent, data-driven trading decisions.
+zAck Trading Bot is a sophisticated, event-driven, and modular algorithmic trading
+application designed for the Indian stock market (NIFTY 50). It leverages modern AI,
+including Large Language Models (LLMs) and Retrieval-Augmented Generation (RAG), to
+make intelligent, data-driven trading decisions.
 
 ## Key Features
 - Automated F&O trading via the Zerodha Kite Connect API
@@ -42,4 +45,8 @@ Central brain of the application managing the event loop and coordinating agents
 For environment setup and detailed run instructions, see [config.md](config.md).
 
 ## Disclaimer
-This software is provided for educational and experimental purposes only. Algorithmic trading involves substantial risk and is not suitable for all investors. The authors and contributors are not responsible for any financial losses incurred through the use of this software. Always test thoroughly in paper trading mode before deploying with real capital.
+This software is provided for educational and experimental purposes only. Algorithmic
+trading involves substantial risk and is not suitable for all investors. The authors
+and contributors are not responsible for any financial losses incurred through the
+use of this software. Always test thoroughly in paper trading mode before deploying
+with real capital.
