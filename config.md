@@ -42,10 +42,7 @@ pip install TA-Lib
 
 ### 4. Initialize the database
 ```bash
-python - <<'PY'
-from database import init_db
-init_db()
-PY
+python init_db.py
 ```
 
 ### 5. Run the trading engine
