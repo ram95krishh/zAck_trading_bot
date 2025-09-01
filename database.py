@@ -1,14 +1,35 @@
 import os
 import datetime
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean
+import logging
+from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, text
 from sqlalchemy.orm import declarative_base, sessionmaker
+from sqlalchemy.engine.url import make_url
+
+logger = logging.getLogger(__name__)
 
 DATABASE_URL = os.getenv(
     "DATABASE_URL",
     "postgresql+psycopg://postgres:postgres@localhost:5432/trading",
 )
 
-engine = create_engine(DATABASE_URL)
+
+def create_db_engine(url: str):
+    url_obj = make_url(url)
+    if url_obj.password:
+        url_obj = url_obj.set(password="***")
+    logger.info("Connecting to database at %s", url_obj)
+    try:
+        engine = create_engine(url)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        logger.info("Database connection established")
+        return engine
+    except Exception:
+        logger.exception("Database connection failed")
+        raise
+
+
+engine = create_db_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
@@ -54,7 +75,9 @@ class SentimentStat(Base):
 
 
 def init_db():
+    logger.info("Creating database tables")
     Base.metadata.create_all(bind=engine)
+    logger.info("Database tables ensured")
 
 
 def log_trade_db(details: dict):
