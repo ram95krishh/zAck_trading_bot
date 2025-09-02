@@ -106,23 +106,35 @@ class MarketConditionIdentifier:
         raise ConnectionError(f"Could not fetch instruments for {exchange} after multiple retries.")
 
     def _fetch_price_history(self, token, symbol, start, end, interval="day"):
+        # Normalize to datetimes for consistent arithmetic
+        if isinstance(start, datetime.date) and not isinstance(start, datetime.datetime):
+            start = datetime.datetime.combine(start, datetime.time.min)
+        if isinstance(end, datetime.date) and not isinstance(end, datetime.datetime):
+            end = datetime.datetime.combine(end, datetime.time.min)
+
         key = (symbol, start, end, interval)
         if key in self._cache:
             return self._cache[key]
+
         records = get_price_history(symbol, start, end)
         delta = datetime.timedelta(days=1)
+
         if records:
             last_date = max(r["date"] for r in records)
+            if isinstance(last_date, datetime.date) and not isinstance(last_date, datetime.datetime):
+                last_date = datetime.datetime.combine(last_date, datetime.time.min)
             if last_date >= end - delta:
                 self._cache[key] = records
                 return records
             fetch_from = last_date + delta
         else:
             fetch_from = start
+
         if fetch_from <= end:
             new_data = self.kite.historical_data(token, fetch_from, end, interval)
             upsert_price_history(symbol, new_data)
             records.extend(new_data)
+
         self._cache[key] = records
         return records
 

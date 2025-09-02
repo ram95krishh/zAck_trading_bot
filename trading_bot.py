@@ -74,24 +74,38 @@ class TradingBotOrchestrator:
         return mapping.get(timeframe, datetime.timedelta(days=1))
 
     async def _fetch_price_history(self, token, symbol, start, end, timeframe):
+        # Normalize start/end to datetimes so comparisons work reliably
+        if isinstance(start, datetime.date) and not isinstance(start, datetime.datetime):
+            start = datetime.datetime.combine(start, datetime.time.min)
+        if isinstance(end, datetime.date) and not isinstance(end, datetime.datetime):
+            end = datetime.datetime.combine(end, datetime.time.min)
+
         key = (symbol, start, end, timeframe)
         if key in self._price_cache:
             return self._price_cache[key]
+
         records = get_price_history(symbol, start, end)
         delta = self._timeframe_delta(timeframe)
+
         if records:
             last_date = max(r["date"] for r in records)
+            if isinstance(last_date, datetime.date) and not isinstance(last_date, datetime.datetime):
+                last_date = datetime.datetime.combine(last_date, datetime.time.min)
             if last_date >= end - delta:
                 self._price_cache[key] = records
                 return records
             fetch_from = last_date + delta
         else:
             fetch_from = start
+
         new_data = []
         if fetch_from <= end:
-            new_data = await asyncio.to_thread(self.kite.historical_data, token, fetch_from, end, timeframe)
+            new_data = await asyncio.to_thread(
+                self.kite.historical_data, token, fetch_from, end, timeframe
+            )
             upsert_price_history(symbol, new_data)
             records.extend(new_data)
+
         self._price_cache[key] = records
         return records
 
