@@ -44,7 +44,10 @@ class TradingBotOrchestrator:
         self.rag_service = RAGService(config)
         self.langgraph_agent = LangGraphAgent(config, self.rag_service)
         self.sentiment_agent = SentimentAgent(config)
-        self.openai_client = AsyncOpenAI(api_key=config.get('openai', {}).get('api_key'))
+        # Disable automatic retries so we can apply our own global throttling
+        self.openai_client = AsyncOpenAI(
+            api_key=config.get('openai', {}).get('api_key'), max_retries=0
+        )
         self.openai_lock = asyncio.Lock()
         
         self.market_condition_identifier = None

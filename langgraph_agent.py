@@ -10,10 +10,14 @@ class LangGraphAgent:
         self.config = config
         self.rag_service = rag_service
         api_key = config.get('openai', {}).get('api_key', "")
-        self.client = AsyncOpenAI(api_key=api_key) if api_key else None
+        # Disable the SDK's automatic retries so our manual backoff controls pacing
+        self.client = (
+            AsyncOpenAI(api_key=api_key, max_retries=0) if api_key else None
+        )
         self.model_name = "gpt-4o-mini"
         self._last_recommendation = None
         self._last_call_time = None
+        self._next_call_time = None
 
     async def get_recommended_strategy(self, market_conditions: set, user_prompt: str = None, rag_context: str = None):
         """
@@ -30,6 +34,16 @@ class LangGraphAgent:
             'strategy_reassessment_period_minutes', 30
         )
         now = datetime.datetime.utcnow()
+
+        # Respect any cooldown from a previous rate-limit hit
+        if self._next_call_time and now < self._next_call_time:
+            wait_for = (self._next_call_time - now).total_seconds()
+            logging.info(
+                f"[OpenAI Agent] Waiting {wait_for:.1f}s before next recommendation call"
+            )
+            await asyncio.sleep(wait_for)
+            now = datetime.datetime.utcnow()
+
         if (
             self._last_recommendation
             and self._last_call_time
@@ -76,7 +90,7 @@ class LangGraphAgent:
         prompt = "\n".join(prompt_sections)
 
         try:
-            backoff = 1
+            backoff = 15
             while True:
                 try:
                     response = await self.client.chat.completions.create(
@@ -104,8 +118,10 @@ class LangGraphAgent:
                         logging.warning("[OpenAI Agent] Token quota exceeded.")
                     retry_after = headers.get("retry-after")
                     sleep_for = float(retry_after) if retry_after else backoff
+                    # Record cooldown to throttle subsequent calls
+                    self._next_call_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=sleep_for)
                     await asyncio.sleep(sleep_for)
-                    backoff = min(backoff * 2, 60)
+                    backoff = min(backoff * 2, 300)
                 except Exception:
                     raise
             recommended_strategy = (
