@@ -12,6 +12,7 @@ from sqlalchemy import (
     text,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.engine.url import make_url
 
@@ -166,23 +167,39 @@ def get_price_history(symbol: str, start_date: datetime.datetime, end_date: date
 def upsert_price_history(symbol: str, candles: list[dict]):
     session = SessionLocal()
     try:
+        rows = []
         for c in candles:
             dt = c.get("date")
             if isinstance(dt, str):
                 dt = datetime.datetime.fromisoformat(dt)
-            session.merge(
-                PriceHistory(
-                    symbol=symbol,
-                    date=dt,
-                    open=c.get("open"),
-                    high=c.get("high"),
-                    low=c.get("low"),
-                    close=c.get("close"),
-                    volume=c.get("volume"),
-                )
+            if dt.tzinfo:
+                dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            rows.append(
+                {
+                    "symbol": symbol,
+                    "date": dt,
+                    "open": c.get("open"),
+                    "high": c.get("high"),
+                    "low": c.get("low"),
+                    "close": c.get("close"),
+                    "volume": c.get("volume"),
+                }
             )
-        session.commit()
-        price_cache.clear()
+        if rows:
+            stmt = insert(PriceHistory).values(rows)
+            update_cols = {
+                "open": stmt.excluded.open,
+                "high": stmt.excluded.high,
+                "low": stmt.excluded.low,
+                "close": stmt.excluded.close,
+                "volume": stmt.excluded.volume,
+            }
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["symbol", "date"], set_=update_cols
+            )
+            session.execute(stmt)
+            session.commit()
+            price_cache.clear()
     except Exception:
         session.rollback()
         raise
