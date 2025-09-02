@@ -122,7 +122,9 @@ class OrderExecutionAgent:
             option_type = 'CE' if direction == 'BUY' else 'PE'
             
             today = datetime.date.today()
-            expiries = pd.to_datetime(self.nfo_instruments['expiry']).dt.date
+            expiries = pd.to_datetime(
+                self.nfo_instruments['expiry'], utc=True
+            ).dt.tz_localize(None).dt.date
             possible_expiries = sorted([d for d in expiries.unique() if d >= today])
             
             if not possible_expiries:
@@ -134,7 +136,12 @@ class OrderExecutionAgent:
                 (self.nfo_instruments['name'] == self.flags['underlying_instrument'].split(" ")[0]) &
                 (self.nfo_instruments['strike'] == atm_strike) &
                 (self.nfo_instruments['instrument_type'] == option_type) &
-                (pd.to_datetime(self.nfo_instruments['expiry']).dt.date == expiry_date)
+                (
+                    pd.to_datetime(
+                        self.nfo_instruments['expiry'], utc=True
+                    ).dt.tz_localize(None).dt.date
+                    == expiry_date
+                )
             ]
 
             if target.empty:
@@ -230,8 +237,12 @@ class PositionManagementAgent:
     async def analyze_losing_trade(self, trade_details, underlying_df, sentiment_agent, openai_client):
         logging.info(f"Analyzing losing trade for {trade_details['Symbol']}...")
         try:
-            entry_time = pd.to_datetime(trade_details['Timestamp']) - datetime.timedelta(minutes=10)
-            exit_time = pd.to_datetime(trade_details['Timestamp'])
+            entry_time = pd.to_datetime(
+                trade_details['Timestamp'], utc=True
+            ).tz_localize(None) - datetime.timedelta(minutes=10)
+            exit_time = pd.to_datetime(
+                trade_details['Timestamp'], utc=True
+            ).tz_localize(None)
             trade_window_df = underlying_df[(underlying_df.index >= entry_time) & (underlying_df.index <= exit_time)]
             market_snapshot = trade_window_df[['open', 'high', 'low', 'close', 'volume', 'rsi']].to_string()
             news_sentiment_at_time = sentiment_agent.get_market_sentiment()

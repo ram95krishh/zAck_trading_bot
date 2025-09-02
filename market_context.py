@@ -148,7 +148,7 @@ class MarketConditionIdentifier:
             # 1. Get VIX condition
             vix_hist_records = self._fetch_price_history(self.vix_token, 'INDIA VIX', from_date, to_date)
             vix_hist = pd.DataFrame(vix_hist_records)
-            vix_hist['date'] = pd.to_datetime(vix_hist['date']).dt.date
+            vix_hist['date'] = pd.to_datetime(vix_hist['date'], utc=True).dt.tz_localize(None).dt.date
             today_vix_data = vix_hist[vix_hist['date'] == target_date]
 
             if not today_vix_data.empty:

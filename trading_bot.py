@@ -188,7 +188,9 @@ class TradingBotOrchestrator:
             if use_rag_flag:
                 trade_log_df = self.rag_service._load_data(self.rag_service.trade_log_path)
                 if trade_log_df is not None and not trade_log_df.empty:
-                    trading_days = pd.to_datetime(trade_log_df['Timestamp']).dt.date.nunique()
+                    trading_days = pd.to_datetime(
+                        trade_log_df['Timestamp'], utc=True
+                    ).dt.tz_localize(None).dt.date.nunique()
                     if trading_days >= rag_min_days:
                         logging.info(f"Sufficient historical data found ({trading_days} days). Activating RAG.")
                         rag_context = self.rag_service.retrieve_context_for_strategy_selection(todays_conditions)
@@ -315,7 +317,7 @@ class TradingBotOrchestrator:
                         self.config['trading_flags']['chart_timeframe'],
                     )
                     hist_df = pd.DataFrame(hist_records)
-                    hist_df['date'] = pd.to_datetime(hist_df['date'])
+                    hist_df['date'] = pd.to_datetime(hist_df['date'], utc=True).dt.tz_localize(None)
                     hist_df.set_index('date', inplace=True)
                     
                     day_df_for_status = calculate_all_indicators(hist_df.copy(), self.config)
@@ -354,7 +356,9 @@ class TradingBotOrchestrator:
                         self.config['trading_flags']['chart_timeframe'],
                     )
                     underlying_df_hist = pd.DataFrame(underlying_records)
-                    underlying_df_hist['date'] = pd.to_datetime(underlying_df_hist['date'])
+                    underlying_df_hist['date'] = pd.to_datetime(
+                        underlying_df_hist['date'], utc=True
+                    ).dt.tz_localize(None)
                     underlying_df_hist.set_index('date', inplace=True)
                     underlying_df = calculate_all_indicators(underlying_df_hist, self.config)
                     status = await self.position_agent.manage(
