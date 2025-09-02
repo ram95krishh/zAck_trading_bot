@@ -1,4 +1,6 @@
 import logging
+import asyncio
+import datetime
 from openai import AsyncOpenAI
 from rag_service import RAGService
 
@@ -10,6 +12,8 @@ class LangGraphAgent:
         api_key = config.get('openai', {}).get('api_key', "")
         self.client = AsyncOpenAI(api_key=api_key) if api_key else None
         self.model_name = "gpt-4o-mini"
+        self._last_recommendation = None
+        self._last_call_time = None
 
     async def get_recommended_strategy(self, market_conditions: set, user_prompt: str = None, rag_context: str = None):
         """
@@ -21,6 +25,18 @@ class LangGraphAgent:
             return "OpenAI_Default"
 
         logging.info(f"[OpenAI Agent] Market Conditions: {market_conditions}. Recommending strategy...")
+
+        reassess_minutes = self.config['trading_flags'].get(
+            'strategy_reassessment_period_minutes', 30
+        )
+        now = datetime.datetime.utcnow()
+        if (
+            self._last_recommendation
+            and self._last_call_time
+            and now - self._last_call_time < datetime.timedelta(minutes=reassess_minutes)
+        ):
+            logging.info("[OpenAI Agent] Using cached strategy recommendation")
+            return self._last_recommendation
 
         prompt_sections = [
             "You are an expert intraday options trading strategist for the Indian NIFTY 50 index.",
@@ -60,11 +76,26 @@ class LangGraphAgent:
         prompt = "\n".join(prompt_sections)
 
         try:
-            response = await self.client.chat.completions.create(
-                model=self.model_name,
-                messages=[{"role": "user", "content": prompt}],
+            backoff = 1
+            while True:
+                try:
+                    response = await self.client.chat.completions.create(
+                        model=self.model_name,
+                        messages=[{"role": "user", "content": prompt}],
+                    )
+                    break
+                except Exception as e:
+                    if '429' in str(e):
+                        logging.warning(
+                            f"[OpenAI Agent] Rate limit hit. Retrying in {backoff} seconds."
+                        )
+                        await asyncio.sleep(backoff)
+                        backoff = min(backoff * 2, 60)
+                    else:
+                        raise
+            recommended_strategy = (
+                response.choices[0].message.content.strip().replace("'", "").split('\n')[-1]
             )
-            recommended_strategy = response.choices[0].message.content.strip().replace("'", "").split('\n')[-1]
 
             valid_strategies = [
                 "OpenAI_Default", "Supertrend_MACD", "Volatility_Cluster_Reversal",
@@ -77,6 +108,8 @@ class LangGraphAgent:
                 recommended_strategy = "OpenAI_Default"
 
             logging.info(f"[OpenAI Agent] AI Recommended Strategy: {recommended_strategy}")
+            self._last_recommendation = recommended_strategy
+            self._last_call_time = now
             return recommended_strategy
 
         except Exception as e:

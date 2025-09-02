@@ -45,6 +45,7 @@ class TradingBotOrchestrator:
         self.langgraph_agent = LangGraphAgent(config, self.rag_service)
         self.sentiment_agent = SentimentAgent(config)
         self.openai_client = AsyncOpenAI(api_key=config.get('openai', {}).get('api_key'))
+        self.openai_lock = asyncio.Lock()
         
         self.market_condition_identifier = None
         self.order_agent = None
@@ -201,7 +202,10 @@ class TradingBotOrchestrator:
             else:
                 logging.info("RAG is disabled in config.yaml.")
 
-            best_strategy_name = await self.langgraph_agent.get_recommended_strategy(todays_conditions, user_prompt, rag_context)
+            async with self.openai_lock:
+                best_strategy_name = await self.langgraph_agent.get_recommended_strategy(
+                    todays_conditions, user_prompt, rag_context
+                )
             
             self.active_strategy_name = best_strategy_name
             self.active_strategy = get_strategy(best_strategy_name, self.kite, self.config)
@@ -336,13 +340,35 @@ class TradingBotOrchestrator:
                             
                             if getattr(self.active_strategy, 'is_reversal_trade', False) or is_primary_signal:
                                 logging.info(f"PRIMARY SIGNAL '{signal}' detected, proceeding with trade.")
-                                trade_details = await (self.order_agent.get_paper_trade_details(signal) if is_paper else self.order_agent.place_trade(signal))
+                                trade_details = await (
+                                    self.order_agent.get_paper_trade_details(signal)
+                                    if is_paper
+                                    else self.order_agent.place_trade(signal)
+                                )
                                 if trade_details:
                                     trade_details['Strategy'] = self.active_strategy_name
                                     self.position_agent.start_trade(trade_details)
+                                    desc = self.order_agent._describe_option_symbol(
+                                        trade_details['symbol']
+                                    )
+                                    logging.info(
+                                        f"Entered {desc} ({trade_details['symbol']}) at {trade_details['entry_price']:.2f} Qty: {trade_details['quantity']}"
+                                    )
+                                    log_trade(
+                                        {
+                                            'Timestamp': datetime.datetime.utcnow(),
+                                            'OrderID': trade_details.get('order_id'),
+                                            'Symbol': trade_details['symbol'],
+                                            'TradeType': trade_details['type'],
+                                            'EntryPrice': trade_details['entry_price'],
+                                            'Quantity': trade_details['quantity'],
+                                            'Status': 'OPEN',
+                                            'Strategy': self.active_strategy_name,
+                                        }
+                                    )
                                     self.trades_today_count += 1
                                     self.bot_state = "IN_POSITION"
-                                    self.awaiting_signal_since = None 
+                                    self.awaiting_signal_since = None
                             else:
                                 logging.warning(f"COUNTER-SIGNAL DETECTED: A '{signal}' signal occurred when sentiment is '{self.day_sentiment}'.")
 
@@ -366,6 +392,7 @@ class TradingBotOrchestrator:
                         underlying_hist_df=underlying_df,
                         sentiment_agent=self.sentiment_agent,
                         openai_client=self.openai_client,
+                        openai_lock=self.openai_lock,
                     )
                     if status and status != 'ACTIVE':
                         log_trade(status)
