@@ -1,6 +1,7 @@
 import os
 import datetime
 import logging
+from datetime import timezone
 from sqlalchemy import (
     create_engine,
     Column,
@@ -44,10 +45,14 @@ engine = create_db_engine(DATABASE_URL)
 SessionLocal = sessionmaker(bind=engine, autoflush=False, autocommit=False)
 Base = declarative_base()
 
+
+def utcnow():
+    return datetime.datetime.now(timezone.utc)
+
 class Trade(Base):
     __tablename__ = "trades"
     id = Column(Integer, primary_key=True, index=True)
-    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    timestamp = Column(DateTime(timezone=True), default=utcnow)
     order_id = Column(String, index=True)
     symbol = Column(String)
     trade_type = Column(String)
@@ -67,13 +72,13 @@ class Holding(Base):
     symbol = Column(String, index=True)
     quantity = Column(Float)
     avg_price = Column(Float)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow)
 
 class Fund(Base):
     __tablename__ = "funds"
     id = Column(Integer, primary_key=True, default=1)
     cash = Column(Float)
-    updated_at = Column(DateTime, default=datetime.datetime.utcnow, onupdate=datetime.datetime.utcnow)
+    updated_at = Column(DateTime(timezone=True), default=utcnow, onupdate=utcnow)
 
 class SentimentStat(Base):
     __tablename__ = "sentiment_stats"
@@ -82,7 +87,7 @@ class SentimentStat(Base):
     sector = Column(String)
     sentiment = Column(String)
     trend = Column(String)
-    timestamp = Column(DateTime, default=datetime.datetime.utcnow)
+    timestamp = Column(DateTime(timezone=True), default=utcnow)
 
 class PriceHistory(Base):
     __tablename__ = "price_history"
@@ -107,7 +112,7 @@ def log_trade_db(details: dict):
     session = SessionLocal()
     try:
         trade = Trade(
-            timestamp=details.get("Timestamp", datetime.datetime.utcnow()),
+            timestamp=details.get("Timestamp", utcnow()),
             order_id=details.get("OrderID"),
             symbol=details.get("Symbol"),
             trade_type=details.get("TradeType"),

@@ -1,6 +1,7 @@
 import logging
 import asyncio
 import datetime
+from datetime import timezone
 from openai import AsyncOpenAI, RateLimitError
 from rag_service import RAGService
 
@@ -33,7 +34,7 @@ class LangGraphAgent:
         reassess_minutes = self.config['trading_flags'].get(
             'strategy_reassessment_period_minutes', 30
         )
-        now = datetime.datetime.utcnow()
+        now = datetime.datetime.now(timezone.utc)
 
         # Respect any cooldown from a previous rate-limit hit
         if self._next_call_time and now < self._next_call_time:
@@ -42,7 +43,7 @@ class LangGraphAgent:
                 f"[OpenAI Agent] Waiting {wait_for:.1f}s before next recommendation call"
             )
             await asyncio.sleep(wait_for)
-            now = datetime.datetime.utcnow()
+            now = datetime.datetime.now(timezone.utc)
 
         if (
             self._last_recommendation
@@ -119,7 +120,7 @@ class LangGraphAgent:
                     retry_after = headers.get("retry-after")
                     sleep_for = float(retry_after) if retry_after else backoff
                     # Record cooldown to throttle subsequent calls
-                    self._next_call_time = datetime.datetime.utcnow() + datetime.timedelta(seconds=sleep_for)
+                    self._next_call_time = datetime.datetime.now(timezone.utc) + datetime.timedelta(seconds=sleep_for)
                     await asyncio.sleep(sleep_for)
                     backoff = min(backoff * 2, 300)
                 except Exception:
