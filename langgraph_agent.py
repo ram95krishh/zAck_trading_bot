@@ -1,7 +1,7 @@
 import logging
 import asyncio
 import datetime
-from openai import AsyncOpenAI
+from openai import AsyncOpenAI, RateLimitError
 from rag_service import RAGService
 
 class LangGraphAgent:
@@ -83,16 +83,31 @@ class LangGraphAgent:
                         model=self.model_name,
                         messages=[{"role": "user", "content": prompt}],
                     )
-                    break
-                except Exception as e:
-                    if '429' in str(e):
-                        logging.warning(
-                            f"[OpenAI Agent] Rate limit hit. Retrying in {backoff} seconds."
+                    headers = getattr(getattr(response, "response", None), "headers", {})
+                    if headers:
+                        logging.debug(f"[OpenAI Agent] Response headers: {headers}")
+                    if getattr(response, "usage", None):
+                        logging.info(
+                            f"[OpenAI Agent] Usage - prompt: {response.usage.prompt_tokens}, total: {response.usage.total_tokens}"
                         )
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, 60)
-                    else:
-                        raise
+                    break
+                except RateLimitError as e:
+                    headers = getattr(getattr(e, "response", None), "headers", {})
+                    logging.warning(
+                        f"[OpenAI Agent] Rate limit hit. Headers: {headers}"
+                    )
+                    remaining_req = headers.get("x-ratelimit-remaining-requests")
+                    remaining_tok = headers.get("x-ratelimit-remaining-tokens")
+                    if remaining_req == "0" and (remaining_tok and remaining_tok != "0"):
+                        logging.warning("[OpenAI Agent] Request rate limit exceeded.")
+                    if remaining_tok == "0":
+                        logging.warning("[OpenAI Agent] Token quota exceeded.")
+                    retry_after = headers.get("retry-after")
+                    sleep_for = float(retry_after) if retry_after else backoff
+                    await asyncio.sleep(sleep_for)
+                    backoff = min(backoff * 2, 60)
+                except Exception:
+                    raise
             recommended_strategy = (
                 response.choices[0].message.content.strip().replace("'", "").split('\n')[-1]
             )

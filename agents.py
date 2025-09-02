@@ -6,6 +6,7 @@ import asyncio
 import re
 from kiteconnect import KiteConnect, exceptions
 from rag_service import RAGService
+from openai import RateLimitError
 
 def _execute_order_sync(api_key: str, access_token: str, order_params: dict) -> str | None:
     """
@@ -311,16 +312,28 @@ class PositionManagementAgent:
                             model="gpt-4o-mini",
                             messages=[{"role": "user", "content": prompt}],
                         )
-                    break
-                except Exception as e:
-                    if '429' in str(e):
-                        logging.warning(
-                            f"OpenAI rate limit encountered during loss analysis. Retrying in {backoff} seconds."
+                    if getattr(response, "usage", None):
+                        logging.info(
+                            f"[Loss Analysis] Usage - prompt: {response.usage.prompt_tokens}, total: {response.usage.total_tokens}"
                         )
-                        await asyncio.sleep(backoff)
-                        backoff = min(backoff * 2, 60)
-                    else:
-                        raise
+                    break
+                except RateLimitError as e:
+                    headers = getattr(getattr(e, "response", None), "headers", {})
+                    logging.warning(
+                        f"OpenAI rate limit encountered during loss analysis. Headers: {headers}"
+                    )
+                    remaining_req = headers.get("x-ratelimit-remaining-requests")
+                    remaining_tok = headers.get("x-ratelimit-remaining-tokens")
+                    if remaining_req == "0" and (remaining_tok and remaining_tok != "0"):
+                        logging.warning("Request rate limit exceeded.")
+                    if remaining_tok == "0":
+                        logging.warning("Token quota exceeded.")
+                    retry_after = headers.get("retry-after")
+                    sleep_for = float(retry_after) if retry_after else backoff
+                    await asyncio.sleep(sleep_for)
+                    backoff = min(backoff * 2, 60)
+                except Exception:
+                    raise
             rationale = response.choices[0].message.content.strip()
             logging.info(f"AI Rationale for Loss (with RAG): {rationale}")
             return rationale
