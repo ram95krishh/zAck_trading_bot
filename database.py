@@ -1,7 +1,17 @@
 import os
 import datetime
 import logging
-from sqlalchemy import create_engine, Column, Integer, String, Float, DateTime, Boolean, text
+from sqlalchemy import (
+    create_engine,
+    Column,
+    Integer,
+    String,
+    Float,
+    DateTime,
+    Boolean,
+    text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import declarative_base, sessionmaker
 from sqlalchemy.engine.url import make_url
 
@@ -73,6 +83,18 @@ class SentimentStat(Base):
     trend = Column(String)
     timestamp = Column(DateTime, default=datetime.datetime.utcnow)
 
+class PriceHistory(Base):
+    __tablename__ = "price_history"
+    id = Column(Integer, primary_key=True, index=True)
+    symbol = Column(String, index=True)
+    date = Column(DateTime, index=True)
+    open = Column(Float)
+    high = Column(Float)
+    low = Column(Float)
+    close = Column(Float)
+    volume = Column(Float)
+    __table_args__ = (UniqueConstraint("symbol", "date", name="uix_symbol_date"),)
+
 
 def init_db():
     logger.info("Creating database tables")
@@ -100,6 +122,67 @@ def log_trade_db(details: dict):
         )
         session.add(trade)
         session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()
+
+price_cache = {}
+
+def get_price_history(symbol: str, start_date: datetime.datetime, end_date: datetime.datetime):
+    cache_key = (symbol, start_date, end_date)
+    if cache_key in price_cache:
+        return price_cache[cache_key]
+    session = SessionLocal()
+    try:
+        rows = (
+            session.query(PriceHistory)
+            .filter(
+                PriceHistory.symbol == symbol,
+                PriceHistory.date >= start_date,
+                PriceHistory.date <= end_date,
+            )
+            .order_by(PriceHistory.date)
+            .all()
+        )
+        data = [
+            {
+                "date": r.date,
+                "open": r.open,
+                "high": r.high,
+                "low": r.low,
+                "close": r.close,
+                "volume": r.volume,
+            }
+            for r in rows
+        ]
+        price_cache[cache_key] = data
+        return data
+    finally:
+        session.close()
+
+
+def upsert_price_history(symbol: str, candles: list[dict]):
+    session = SessionLocal()
+    try:
+        for c in candles:
+            dt = c.get("date")
+            if isinstance(dt, str):
+                dt = datetime.datetime.fromisoformat(dt)
+            session.merge(
+                PriceHistory(
+                    symbol=symbol,
+                    date=dt,
+                    open=c.get("open"),
+                    high=c.get("high"),
+                    low=c.get("low"),
+                    close=c.get("close"),
+                    volume=c.get("volume"),
+                )
+            )
+        session.commit()
+        price_cache.clear()
     except Exception:
         session.rollback()
         raise

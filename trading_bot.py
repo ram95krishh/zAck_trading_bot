@@ -12,7 +12,7 @@ from langgraph_agent import LangGraphAgent
 from strategy_factory import get_strategy
 from backtester import run_backtest
 from reporting import send_daily_report, initialize_trade_log, log_trade, send_monthly_report
-from database import sync_holdings
+from database import sync_holdings, get_price_history, upsert_price_history
 from indicators import calculate_cpr, is_trend_overextended, check_momentum_divergence
 from indicator_calculator import calculate_all_indicators
 from market_context import MarketConditionIdentifier
@@ -58,6 +58,42 @@ class TradingBotOrchestrator:
         self.last_divergence_warning = ""
         self.awaiting_signal_since = None
         self.is_paper_trading = self.config['trading_flags'].get('paper_trading', True)
+        self._price_cache = {}
+
+    def _timeframe_delta(self, timeframe):
+        mapping = {
+            "day": datetime.timedelta(days=1),
+            "minute": datetime.timedelta(minutes=1),
+            "3minute": datetime.timedelta(minutes=3),
+            "5minute": datetime.timedelta(minutes=5),
+            "10minute": datetime.timedelta(minutes=10),
+            "15minute": datetime.timedelta(minutes=15),
+            "30minute": datetime.timedelta(minutes=30),
+            "60minute": datetime.timedelta(minutes=60),
+        }
+        return mapping.get(timeframe, datetime.timedelta(days=1))
+
+    async def _fetch_price_history(self, token, symbol, start, end, timeframe):
+        key = (symbol, start, end, timeframe)
+        if key in self._price_cache:
+            return self._price_cache[key]
+        records = get_price_history(symbol, start, end)
+        delta = self._timeframe_delta(timeframe)
+        if records:
+            last_date = max(r["date"] for r in records)
+            if last_date >= end - delta:
+                self._price_cache[key] = records
+                return records
+            fetch_from = last_date + delta
+        else:
+            fetch_from = start
+        new_data = []
+        if fetch_from <= end:
+            new_data = await asyncio.to_thread(self.kite.historical_data, token, fetch_from, end, timeframe)
+            upsert_price_history(symbol, new_data)
+            records.extend(new_data)
+        self._price_cache[key] = records
+        return records
 
     def authenticate(self):
         logging.info("Attempting fresh authentication...")
@@ -155,7 +191,13 @@ class TradingBotOrchestrator:
             self.active_strategy = get_strategy(best_strategy_name, self.kite, self.config)
 
             token = self.order_agent.underlying_token
-            hist = await asyncio.to_thread(self.kite.historical_data, token, today - datetime.timedelta(days=7), today, "day")
+            hist = await self._fetch_price_history(
+                token,
+                self.config['trading_flags']['underlying_instrument'],
+                today - datetime.timedelta(days=7),
+                today,
+                "day",
+            )
             prev_day_data = pd.DataFrame(hist).iloc[-2:-1]
             self.position_agent.cpr_pivots = calculate_cpr(prev_day_data)
             
@@ -186,7 +228,13 @@ class TradingBotOrchestrator:
                 token = self.order_agent.underlying_token
                 to_date = datetime.date.today()
                 from_date = to_date - datetime.timedelta(days=7) # Fetch a week to ensure we get the last trading day
-                hist_data = await asyncio.to_thread(self.kite.historical_data, token, from_date, to_date, "day")
+                hist_data = await self._fetch_price_history(
+                    token,
+                    self.config['trading_flags']['underlying_instrument'],
+                    from_date,
+                    to_date,
+                    "day",
+                )
                 
                 if hist_data:
                     last_day = hist_data[-1]
@@ -245,7 +293,14 @@ class TradingBotOrchestrator:
                         self.bot_state = "STOPPED"; continue
                     
                     token = self.order_agent.underlying_token
-                    hist_df = pd.DataFrame(await asyncio.to_thread(self.kite.historical_data, token, datetime.datetime.now() - datetime.timedelta(days=5), datetime.datetime.now(), self.config['trading_flags']['chart_timeframe']))
+                    hist_records = await self._fetch_price_history(
+                        token,
+                        self.config['trading_flags']['underlying_instrument'],
+                        datetime.datetime.now() - datetime.timedelta(days=5),
+                        datetime.datetime.now(),
+                        self.config['trading_flags']['chart_timeframe'],
+                    )
+                    hist_df = pd.DataFrame(hist_records)
                     hist_df['date'] = pd.to_datetime(hist_df['date'])
                     hist_df.set_index('date', inplace=True)
                     
@@ -277,7 +332,14 @@ class TradingBotOrchestrator:
 
                 elif self.bot_state == "IN_POSITION":
                     token = self.order_agent.underlying_token
-                    underlying_df_hist = pd.DataFrame(await asyncio.to_thread(self.kite.historical_data, token, datetime.datetime.now() - datetime.timedelta(days=1), datetime.datetime.now(), self.config['trading_flags']['chart_timeframe']))
+                    underlying_records = await self._fetch_price_history(
+                        token,
+                        self.config['trading_flags']['underlying_instrument'],
+                        datetime.datetime.now() - datetime.timedelta(days=1),
+                        datetime.datetime.now(),
+                        self.config['trading_flags']['chart_timeframe'],
+                    )
+                    underlying_df_hist = pd.DataFrame(underlying_records)
                     underlying_df_hist['date'] = pd.to_datetime(underlying_df_hist['date'])
                     underlying_df_hist.set_index('date', inplace=True)
                     underlying_df = calculate_all_indicators(underlying_df_hist, self.config)
