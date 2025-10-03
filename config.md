@@ -33,24 +33,33 @@ After installing the system libraries above you can enable the optional TA-Lib b
 pip install TA-Lib
 ```
 
-### 3. Configure the application
+### 3. Start PostgreSQL (Docker Compose option)
+If you do not already have a PostgreSQL instance, the repository ships with a Compose file and helper script. This spins up a local database that listens on port `5432`.
+
+```bash
+scripts/start_db.sh
+```
+
+You can override the default credentials by exporting `POSTGRES_DB`, `POSTGRES_USER`, or `POSTGRES_PASSWORD` before running the script. Logs are available via `docker compose logs -f db`.
+
+### 4. Configure the application
 - Copy `config.example.yaml` to `config.yaml` and fill in API keys and trading flags.
 - Set the `DATABASE_URL` environment variable pointing to your PostgreSQL instance, e.g.:
   ```bash
   export DATABASE_URL=postgresql+psycopg://user:pass@host/dbname
   ```
 
-### 4. Initialize the database
+### 5. Initialize the database
 ```bash
 python init_db.py
 ```
 
-### 5. Run the trading engine
+### 6. Run the trading engine
 ```bash
 python trading_bot.py
 ```
 
-### 6. Run the API server (optional, for REST endpoints)
+### 7. Run the API server (optional, for REST endpoints)
 Open a new terminal, activate the virtual environment, and start `uvicorn`:
 ```bash
 uvicorn api:app --reload
