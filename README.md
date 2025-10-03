@@ -44,6 +44,8 @@ Central brain of the application managing the event loop and coordinating agents
 
 For environment setup and detailed run instructions, see [config.md](config.md).
 
+For a high-level architecture diagram of the engine, visit [docs/architecture.md](docs/architecture.md).
+
 ## Disclaimer
 This software is provided for educational and experimental purposes only. Algorithmic
 trading involves substantial risk and is not suitable for all investors. The authors
