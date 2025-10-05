@@ -6,6 +6,8 @@ from newsapi import NewsApiClient
 from textblob import TextBlob
 import time
 
+from database import SessionLocal, SentimentStat
+
 class SentimentAgent:
     """
     An agent for fetching news and determining market sentiment with intensity.
@@ -21,6 +23,24 @@ class SentimentAgent:
             "Larsen & Toubro", "TCS", "Bharti Airtel", "ITC", "Kotak Mahindra Bank",
             "Hindustan Unilever", "RBI", "NIFTY", "Attack", "FED", "Repo Rate", "Indian economy", "India"
         ]
+
+    def _record_sentiment(self, sentiment: str):
+        """Persist the derived sentiment to the database for later analysis."""
+        session = SessionLocal()
+        try:
+            session.add(
+                SentimentStat(
+                    symbol=self.config['trading_flags'].get('underlying_instrument'),
+                    sector="market",
+                    sentiment=sentiment,
+                )
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            logging.exception("SentimentAgent: Failed to record sentiment to database")
+        finally:
+            session.close()
 
     def _get_news_articles(self):
         """
@@ -96,12 +116,15 @@ class SentimentAgent:
         logging.info(f"SentimentAgent: Weighted average sentiment score is {avg_sentiment:.3f}")
 
         if avg_sentiment > 0.4:
-            return "Very Bullish" #
+            sentiment = "Very Bullish"
         elif avg_sentiment > 0.05:
-            return "Bullish" #
+            sentiment = "Bullish"
         elif avg_sentiment < -0.4:
-            return "Very Bearish" #
+            sentiment = "Very Bearish"
         elif avg_sentiment < -0.05:
-            return "Bearish" #
+            sentiment = "Bearish"
         else:
-            return "Neutral" #
+            sentiment = "Neutral"
+
+        self._record_sentiment(sentiment)
+        return sentiment

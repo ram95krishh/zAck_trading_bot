@@ -6,6 +6,7 @@ import pandas as pd
 import numpy as np
 import time
 from kiteconnect.exceptions import DataException, NetworkException
+from database import get_price_history, upsert_price_history
 
 class EconomicCalendar:
     """
@@ -91,6 +92,7 @@ class MarketConditionIdentifier:
         self.calendar = EconomicCalendar()
         self.vix_token = self._get_instrument_token('INDIA VIX', 'NSE')
         self.nifty_token = self._get_instrument_token('NIFTY 50', 'NSE')
+        self._cache = {}
 
     def _get_instrument_token(self, name, exchange):
         """Helper to find instrument token with a retry mechanism."""
@@ -103,6 +105,39 @@ class MarketConditionIdentifier:
                 time.sleep(2 * (i + 1)) # Wait for 2, 4, 6 seconds
         raise ConnectionError(f"Could not fetch instruments for {exchange} after multiple retries.")
 
+    def _fetch_price_history(self, token, symbol, start, end, interval="day"):
+        # Normalize to datetimes for consistent arithmetic
+        if isinstance(start, datetime.date) and not isinstance(start, datetime.datetime):
+            start = datetime.datetime.combine(start, datetime.time.min)
+        if isinstance(end, datetime.date) and not isinstance(end, datetime.datetime):
+            end = datetime.datetime.combine(end, datetime.time.min)
+
+        key = (symbol, start, end, interval)
+        if key in self._cache:
+            return self._cache[key]
+
+        records = get_price_history(symbol, start, end)
+        delta = datetime.timedelta(days=1)
+
+        if records:
+            last_date = max(r["date"] for r in records)
+            if isinstance(last_date, datetime.date) and not isinstance(last_date, datetime.datetime):
+                last_date = datetime.datetime.combine(last_date, datetime.time.min)
+            if last_date >= end - delta:
+                self._cache[key] = records
+                return records
+            fetch_from = last_date + delta
+        else:
+            fetch_from = start
+
+        if fetch_from <= end:
+            new_data = self.kite.historical_data(token, fetch_from, end, interval)
+            upsert_price_history(symbol, new_data)
+            records.extend(new_data)
+
+        self._cache[key] = records
+        return records
+
     def get_conditions_for_date(self, target_date):
         """Fetches all relevant data for a target date and returns a set of condition tags."""
         from_date = target_date - datetime.timedelta(days=60)
@@ -111,8 +146,9 @@ class MarketConditionIdentifier:
 
         try:
             # 1. Get VIX condition
-            vix_hist = pd.DataFrame(self.kite.historical_data(self.vix_token, from_date, to_date, "day"))
-            vix_hist['date'] = pd.to_datetime(vix_hist['date']).dt.date
+            vix_hist_records = self._fetch_price_history(self.vix_token, 'INDIA VIX', from_date, to_date)
+            vix_hist = pd.DataFrame(vix_hist_records)
+            vix_hist['date'] = pd.to_datetime(vix_hist['date'], utc=True).dt.tz_localize(None).dt.date
             today_vix_data = vix_hist[vix_hist['date'] == target_date]
 
             if not today_vix_data.empty:
@@ -126,7 +162,8 @@ class MarketConditionIdentifier:
                 conditions.add(event)
 
             # 3. Get Implied Volatility (IV) proxy condition
-            nifty_hist = pd.DataFrame(self.kite.historical_data(self.nifty_token, from_date, to_date, "day"))
+            nifty_hist_records = self._fetch_price_history(self.nifty_token, 'NIFTY 50', from_date, to_date)
+            nifty_hist = pd.DataFrame(nifty_hist_records)
             nifty_hist['returns'] = nifty_hist['close'].pct_change()
             iv_proxy = nifty_hist['returns'].rolling(window=7).std().iloc[-1]
             if not np.isnan(iv_proxy):

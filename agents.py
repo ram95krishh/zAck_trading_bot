@@ -1,12 +1,12 @@
 import logging
 import pandas as pd
 import pandas_ta as ta
-import aiohttp
-import json
 import datetime
 import asyncio
+import re
 from kiteconnect import KiteConnect, exceptions
 from rag_service import RAGService
+from openai import RateLimitError
 
 def _execute_order_sync(api_key: str, access_token: str, order_params: dict) -> str | None:
     """
@@ -35,8 +35,10 @@ class OrderExecutionAgent:
         self.kite = kite
         self.config = config
         self.flags = config['trading_flags']
+        self.trading_budget = self.flags.get('trading_budget')
         self.nfo_instruments = pd.DataFrame(self.kite.instruments('NFO'))
         self.underlying_token = self._get_instrument_token(self.flags['underlying_instrument'], 'NSE')
+        self._symbol_regex = re.compile(r"([A-Z]+)(\d{2})(\d{1,2})(\d{2})(\d{5})(CE|PE)$")
 
     def _get_instrument_token(self, name, exchange):
         """Helper to find instrument token."""
@@ -65,7 +67,9 @@ class OrderExecutionAgent:
             "order_type": self.kite.ORDER_TYPE_MARKET,
         }
         
-        logging.info(f"ASYNC: Preparing to place LIVE entry order -> {order_params}")
+        logging.info(
+            f"ASYNC: Preparing to place LIVE entry order -> {order_params}"
+        )
         
         try:
             api_key = self.config['zerodha']['api_key']
@@ -104,12 +108,22 @@ class OrderExecutionAgent:
 
     async def get_paper_trade_details(self, direction):
         symbol, qty = await self._get_trade_details(direction)
-        if not symbol or not qty: return None
+        if not symbol or not qty:
+            return None
         try:
             ltp_data = await asyncio.to_thread(self.kite.ltp, f"NFO:{symbol}")
             ltp = ltp_data[f"NFO:{symbol}"]['last_price']
-            logging.info(f"[Paper Trade] Signal for {symbol} at price {ltp} with Qty: {qty}")
-            return {'order_id': f"PAPER_{int(datetime.datetime.now().timestamp())}", 'symbol': symbol, 'quantity': qty, 'entry_price': ltp, 'type': direction}
+            desc = self._describe_option_symbol(symbol)
+            logging.info(
+                f"[Paper Trade] Signal to BUY {desc} ({symbol}) at {ltp:.2f} with Qty: {qty}"
+            )
+            return {
+                'order_id': f"PAPER_{int(datetime.datetime.now().timestamp())}",
+                'symbol': symbol,
+                'quantity': qty,
+                'entry_price': ltp,
+                'type': direction,
+            }
         except Exception as e:
             logging.error(f"Failed to get LTP for paper trade {symbol}: {e}")
             return None
@@ -123,7 +137,9 @@ class OrderExecutionAgent:
             option_type = 'CE' if direction == 'BUY' else 'PE'
             
             today = datetime.date.today()
-            expiries = pd.to_datetime(self.nfo_instruments['expiry']).dt.date
+            expiries = pd.to_datetime(
+                self.nfo_instruments['expiry'], utc=True
+            ).dt.tz_localize(None).dt.date
             possible_expiries = sorted([d for d in expiries.unique() if d >= today])
             
             if not possible_expiries:
@@ -135,18 +151,27 @@ class OrderExecutionAgent:
                 (self.nfo_instruments['name'] == self.flags['underlying_instrument'].split(" ")[0]) &
                 (self.nfo_instruments['strike'] == atm_strike) &
                 (self.nfo_instruments['instrument_type'] == option_type) &
-                (pd.to_datetime(self.nfo_instruments['expiry']).dt.date == expiry_date)
+                (
+                    pd.to_datetime(
+                        self.nfo_instruments['expiry'], utc=True
+                    ).dt.tz_localize(None).dt.date
+                    == expiry_date
+                )
             ]
 
             if target.empty:
-                logging.warning(f"Could not find option for strike {atm_strike}{option_type} with expiry {expiry_date}.")
+                logging.warning(
+                    f"Could not find option for strike {atm_strike}{option_type} with expiry {expiry_date}."
+                )
                 return None, 0
-                
+
             symbol = target.iloc[0]['tradingsymbol']
             lot_size = int(target.iloc[0]['lot_size'])
             
             margins = await asyncio.to_thread(self.kite.margins)
             capital = margins['equity']['available']['live_balance']
+            if self.trading_budget:
+                capital = min(capital, self.trading_budget)
             risk_amount = capital * (self.flags['risk_per_trade_percent'] / 100)
             
             option_ltp_data = await asyncio.to_thread(self.kite.ltp, f"NFO:{symbol}")
@@ -159,11 +184,28 @@ class OrderExecutionAgent:
             num_lots = max(1, int(risk_amount / (option_price * lot_size)))
             quantity = num_lots * lot_size
 
-            logging.info(f"Trade details calculated: Symbol={symbol}, LotSize={lot_size}, Quantity={quantity}")
+            desc = self._describe_option_symbol(symbol)
+            logging.info(
+                f"Trade details calculated: {desc} ({symbol}), LotSize={lot_size}, Quantity={quantity}"
+            )
             return symbol, quantity
         except Exception as e:
             logging.error(f"Error in _get_trade_details: {e}", exc_info=True)
             return None, 0
+
+    def _describe_option_symbol(self, symbol: str) -> str:
+        match = self._symbol_regex.match(symbol)
+        if not match:
+            return symbol
+        underlying, yy, m, dd, strike, opt = match.groups()
+        year = 2000 + int(yy)
+        month = int(m)
+        day = int(dd)
+        try:
+            expiry = datetime.date(year, month, day).strftime('%d %b %Y')
+        except ValueError:
+            expiry = f"{dd}/{m}/{year}"
+        return f"{underlying} {expiry} {strike} {opt}"
 
 
 class PositionManagementAgent:
@@ -176,8 +218,16 @@ class PositionManagementAgent:
         self.cpr_pivots = {}
         self.tsl_config = self.config.get('trailing_stop_loss', {})
 
-    async def manage(self, is_paper_trade=False, underlying_hist_df=None, sentiment_agent=None, gemini_api_key=None):
-        if not self.active_trade: return None
+    async def manage(
+        self,
+        is_paper_trade=False,
+        underlying_hist_df=None,
+        sentiment_agent=None,
+        openai_client=None,
+        openai_lock=None,
+    ):
+        if not self.active_trade:
+            return None
         symbol = self.active_trade['symbol']
         try:
             ltp_data = await asyncio.to_thread(self.kite.ltp, f"NFO:{symbol}")
@@ -189,18 +239,18 @@ class PositionManagementAgent:
         hard_stop_loss_price = self.active_trade['initial_stop_loss']
         if current_price <= hard_stop_loss_price:
              logging.info(f"HARD stop-loss hit for {symbol} at {current_price:.2f} (SL: {hard_stop_loss_price:.2f}). Exiting.")
-             return await self.exit_trade(is_paper_trade, underlying_hist_df, sentiment_agent, gemini_api_key)
+             return await self.exit_trade(is_paper_trade, underlying_hist_df, sentiment_agent, openai_client, openai_lock)
 
         self._update_premium_trailing_stop(current_price)
         trailing_sl_price = self.active_trade.get('trailing_stop_loss')
         if trailing_sl_price is not None and current_price <= trailing_sl_price:
              logging.info(f"TRAILING stop-loss hit for {symbol} at {current_price:.2f} (Trailing SL: {trailing_sl_price:.2f}). Exiting.")
-             return await self.exit_trade(is_paper_trade, underlying_hist_df, sentiment_agent, gemini_api_key)
+             return await self.exit_trade(is_paper_trade, underlying_hist_df, sentiment_agent, openai_client, openai_lock)
 
         if self.tsl_config.get('use_indicator_exit') and underlying_hist_df is not None:
             if self._check_indicator_exit(underlying_hist_df):
                 logging.info(f"INDICATOR-BASED exit signal triggered for {symbol}. Exiting.")
-                return await self.exit_trade(is_paper_trade, underlying_hist_df, sentiment_agent, gemini_api_key)
+                return await self.exit_trade(is_paper_trade, underlying_hist_df, sentiment_agent, openai_client, openai_lock)
 
         return "ACTIVE"
     
@@ -226,23 +276,65 @@ class PositionManagementAgent:
             if self.active_trade['type'] == 'SELL' and underlying_price > ma_value: return True
         return False
     
-    async def analyze_losing_trade(self, trade_details, underlying_df, sentiment_agent, gemini_api_key):
+    async def analyze_losing_trade(
+        self,
+        trade_details,
+        underlying_df,
+        sentiment_agent,
+        openai_client,
+        openai_lock,
+    ):
         logging.info(f"Analyzing losing trade for {trade_details['Symbol']}...")
         try:
-            entry_time = pd.to_datetime(trade_details['Timestamp']) - datetime.timedelta(minutes=10)
-            exit_time = pd.to_datetime(trade_details['Timestamp'])
+            entry_time = pd.to_datetime(
+                trade_details['Timestamp'], utc=True
+            ).tz_localize(None) - datetime.timedelta(minutes=10)
+            exit_time = pd.to_datetime(
+                trade_details['Timestamp'], utc=True
+            ).tz_localize(None)
             trade_window_df = underlying_df[(underlying_df.index >= entry_time) & (underlying_df.index <= exit_time)]
             market_snapshot = trade_window_df[['open', 'high', 'low', 'close', 'volume', 'rsi']].to_string()
             news_sentiment_at_time = sentiment_agent.get_market_sentiment()
             rag_context = self.rag_service.retrieve_context_for_loss_analysis(trade_details)
-            prompt = f"..." # (Your existing Gemini prompt)
-            api_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={gemini_api_key}"
-            payload = {"contents": [{"role": "user", "parts": [{"text": prompt}]}]}
-            async with aiohttp.ClientSession() as session:
-                async with session.post(api_url, json=payload) as response:
-                    response.raise_for_status()
-                    result = await response.json()
-            rationale = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+            prompt = (
+                "You are a trading analyst. Given the trade details, market snapshot, sentiment and context, "
+                "explain why the trade lost money and suggest improvements.\n"
+                f"Trade Details: {trade_details}\n"
+                f"Market Snapshot: {market_snapshot}\n"
+                f"News Sentiment: {news_sentiment_at_time}\n"
+                f"RAG Context: {rag_context}"
+            )
+            backoff = 1
+            while True:
+                try:
+                    async with openai_lock:
+                        response = await openai_client.chat.completions.create(
+                            model="gpt-4o-mini",
+                            messages=[{"role": "user", "content": prompt}],
+                        )
+                    if getattr(response, "usage", None):
+                        logging.info(
+                            f"[Loss Analysis] Usage - prompt: {response.usage.prompt_tokens}, total: {response.usage.total_tokens}"
+                        )
+                    break
+                except RateLimitError as e:
+                    headers = getattr(getattr(e, "response", None), "headers", {})
+                    logging.warning(
+                        f"OpenAI rate limit encountered during loss analysis. Headers: {headers}"
+                    )
+                    remaining_req = headers.get("x-ratelimit-remaining-requests")
+                    remaining_tok = headers.get("x-ratelimit-remaining-tokens")
+                    if remaining_req == "0" and (remaining_tok and remaining_tok != "0"):
+                        logging.warning("Request rate limit exceeded.")
+                    if remaining_tok == "0":
+                        logging.warning("Token quota exceeded.")
+                    retry_after = headers.get("retry-after")
+                    sleep_for = float(retry_after) if retry_after else backoff
+                    await asyncio.sleep(sleep_for)
+                    backoff = min(backoff * 2, 60)
+                except Exception:
+                    raise
+            rationale = response.choices[0].message.content.strip()
             logging.info(f"AI Rationale for Loss (with RAG): {rationale}")
             return rationale
         except Exception as e:
@@ -259,7 +351,14 @@ class PositionManagementAgent:
         self.active_trade['high_water_mark'] = self.active_trade.get('entry_price', 0)
         logging.info(f"Managing trade for {self.active_trade['symbol']}. Entry: {self.active_trade['entry_price']:.2f}, Initial Hard SL: {self.active_trade['initial_stop_loss']:.2f}")
 
-    async def exit_trade(self, is_paper_trade=False, underlying_df=None, sentiment_agent=None, gemini_api_key=None):
+    async def exit_trade(
+        self,
+        is_paper_trade=False,
+        underlying_df=None,
+        sentiment_agent=None,
+        openai_client=None,
+        openai_lock=None,
+    ):
         """
         Asynchronously exits the current active trade using the isolated worker pattern.
         """
@@ -312,8 +411,14 @@ class PositionManagementAgent:
             'Strategy': trade.get('Strategy', 'N/A')
         }
         
-        if pnl < 0 and self.config['trading_flags']['enable_gemini_loss_analysis']:
-            rationale = await self.analyze_losing_trade(completed, underlying_df, sentiment_agent, gemini_api_key)
+        if (
+            pnl < 0
+            and self.config['trading_flags'].get('enable_ai_loss_analysis')
+            and openai_client
+        ):
+            rationale = await self.analyze_losing_trade(
+                completed, underlying_df, sentiment_agent, openai_client, openai_lock
+            )
             completed['Rationale'] = rationale
             
         self.active_trade = None

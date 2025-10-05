@@ -7,10 +7,10 @@ def calculate_all_indicators(df: pd.DataFrame, config: dict):
     This is called once per day to avoid redundant calculations.
     """
     if not isinstance(df.index, pd.DatetimeIndex):
-        df['date'] = pd.to_datetime(df['date'])
+        df['date'] = pd.to_datetime(df['date'], utc=True).dt.tz_localize(None)
         df = df.set_index('date').sort_index()
 
-    # Gemini Default & RSI Divergence Strategy Indicators
+    # OpenAI Default & RSI Divergence Strategy Indicators
     df['rsi'] = ta.rsi(df['close'], length=14)
     df['ema_9'] = ta.ema(df['close'], length=9)
     df['ema_15'] = ta.ema(df['close'], length=15)

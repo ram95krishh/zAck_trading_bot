@@ -57,10 +57,10 @@ def run_backtest(kite, config, strategy_name, from_date, to_date, target_conditi
     if all_data_day.empty or all_data_tf.empty:
         logging.error("Failed to fetch sufficient historical data for backtest."); return 0.0
 
-    all_data_day['date'] = pd.to_datetime(all_data_day['date']).dt.date
-    vix_data['date'] = pd.to_datetime(vix_data['date']).dt.date
+    all_data_day['date'] = pd.to_datetime(all_data_day['date'], utc=True).dt.tz_localize(None).dt.date
+    vix_data['date'] = pd.to_datetime(vix_data['date'], utc=True).dt.tz_localize(None).dt.date
     all_data_day['daily_volatility'] = all_data_day['close'].pct_change().rolling(window=7).std()
-    all_data_tf['date_only'] = pd.to_datetime(all_data_tf['date']).dt.date
+    all_data_tf['date_only'] = pd.to_datetime(all_data_tf['date'], utc=True).dt.tz_localize(None).dt.date
 
     strategy = get_strategy(strategy_name, kite, config)
     trades = []
@@ -88,7 +88,7 @@ def run_backtest(kite, config, strategy_name, from_date, to_date, target_conditi
         if len(day_tf_df) < 50: continue
 
         # Set DatetimeIndex to prevent VWAP error
-        day_tf_df['date'] = pd.to_datetime(day_tf_df['date'])
+        day_tf_df['date'] = pd.to_datetime(day_tf_df['date'], utc=True).dt.tz_localize(None)
         day_tf_df = day_tf_df.set_index('date').sort_index()
 
         from indicators import calculate_cpr

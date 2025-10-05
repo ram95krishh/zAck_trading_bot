@@ -5,6 +5,8 @@ import datetime
 import calendar
 import pandas as pd
 import asyncio
+from zoneinfo import ZoneInfo
+from datetime import timezone
 from kiteconnect import KiteConnect, exceptions
 from agents import OrderExecutionAgent, PositionManagementAgent
 from sentiment_agent import SentimentAgent
@@ -12,10 +14,12 @@ from langgraph_agent import LangGraphAgent
 from strategy_factory import get_strategy
 from backtester import run_backtest
 from reporting import send_daily_report, initialize_trade_log, log_trade, send_monthly_report
+from database import sync_holdings, get_price_history, upsert_price_history
 from indicators import calculate_cpr, is_trend_overextended, check_momentum_divergence
 from indicator_calculator import calculate_all_indicators
 from market_context import MarketConditionIdentifier
 from rag_service import RAGService
+from openai import AsyncOpenAI
 import multiprocessing
 import warnings
 
@@ -42,6 +46,11 @@ class TradingBotOrchestrator:
         self.rag_service = RAGService(config)
         self.langgraph_agent = LangGraphAgent(config, self.rag_service)
         self.sentiment_agent = SentimentAgent(config)
+        # Disable automatic retries so we can apply our own global throttling
+        self.openai_client = AsyncOpenAI(
+            api_key=config.get('openai', {}).get('api_key'), max_retries=0
+        )
+        self.openai_lock = asyncio.Lock()
         
         self.market_condition_identifier = None
         self.order_agent = None
@@ -54,6 +63,57 @@ class TradingBotOrchestrator:
         self.last_processed_timestamp = None
         self.last_divergence_warning = ""
         self.awaiting_signal_since = None
+        self.is_paper_trading = self.config['trading_flags'].get('paper_trading', True)
+        self._price_cache = {}
+
+    def _timeframe_delta(self, timeframe):
+        mapping = {
+            "day": datetime.timedelta(days=1),
+            "minute": datetime.timedelta(minutes=1),
+            "3minute": datetime.timedelta(minutes=3),
+            "5minute": datetime.timedelta(minutes=5),
+            "10minute": datetime.timedelta(minutes=10),
+            "15minute": datetime.timedelta(minutes=15),
+            "30minute": datetime.timedelta(minutes=30),
+            "60minute": datetime.timedelta(minutes=60),
+        }
+        return mapping.get(timeframe, datetime.timedelta(days=1))
+
+    async def _fetch_price_history(self, token, symbol, start, end, timeframe):
+        # Normalize start/end to datetimes so comparisons work reliably
+        if isinstance(start, datetime.date) and not isinstance(start, datetime.datetime):
+            start = datetime.datetime.combine(start, datetime.time.min)
+        if isinstance(end, datetime.date) and not isinstance(end, datetime.datetime):
+            end = datetime.datetime.combine(end, datetime.time.min)
+
+        key = (symbol, start, end, timeframe)
+        if key in self._price_cache:
+            return self._price_cache[key]
+
+        records = get_price_history(symbol, start, end)
+        delta = self._timeframe_delta(timeframe)
+
+        if records:
+            last_date = max(r["date"] for r in records)
+            if isinstance(last_date, datetime.date) and not isinstance(last_date, datetime.datetime):
+                last_date = datetime.datetime.combine(last_date, datetime.time.min)
+            if last_date >= end - delta:
+                self._price_cache[key] = records
+                return records
+            fetch_from = last_date + delta
+        else:
+            fetch_from = start
+
+        new_data = []
+        if fetch_from <= end:
+            new_data = await asyncio.to_thread(
+                self.kite.historical_data, token, fetch_from, end, timeframe
+            )
+            upsert_price_history(symbol, new_data)
+            records.extend(new_data)
+
+        self._price_cache[key] = records
+        return records
 
     def authenticate(self):
         logging.info("Attempting fresh authentication...")
@@ -75,6 +135,9 @@ class TradingBotOrchestrator:
             self.order_agent = OrderExecutionAgent(self.kite, self.config)
             self.position_agent = PositionManagementAgent(self.kite, self.config, self.rag_service)
             logging.info("Agents initialized successfully.")
+
+            sync_holdings(self.kite)
+            initialize_trade_log()
             
             return True
         except Exception as e:
@@ -82,17 +145,18 @@ class TradingBotOrchestrator:
             
     # Helper function to check if the market is open ---
     def is_market_open(self):
-        """Checks if the current time is within Indian market hours."""
-        now = datetime.datetime.now().time()
+        """Checks if the current time in IST is within market hours."""
+        ist = ZoneInfo("Asia/Kolkata")
+        now = datetime.datetime.now(ist)
         market_open = datetime.time(9, 15)
         market_close = datetime.time(15, 30)
-        # Also check if it's a weekday
-        return market_open <= now <= market_close and datetime.datetime.now().weekday() < 5
+        return market_open <= now.time() <= market_close and now.weekday() < 5
 
     # Helper function to get the next trading day ---
     def get_next_trading_day(self):
         """Calculates the next weekday."""
-        today = datetime.date.today()
+        ist = ZoneInfo("Asia/Kolkata")
+        today = datetime.datetime.now(ist).date()
         next_day = today + datetime.timedelta(days=1)
         while next_day.weekday() >= 5: # 5 = Saturday, 6 = Sunday
             next_day += datetime.timedelta(days=1)
@@ -101,7 +165,8 @@ class TradingBotOrchestrator:
     async def setup(self):
         self.bot_state = "SETUP"
         logging.info("--- Starting Bot Setup Sequence ---")
-        today = datetime.date.today()
+        ist = ZoneInfo("Asia/Kolkata")
+        today = datetime.datetime.now(ist).date()
         
         try:
             todays_conditions = self.market_condition_identifier.get_conditions_for_date(today)
@@ -131,7 +196,9 @@ class TradingBotOrchestrator:
             if use_rag_flag:
                 trade_log_df = self.rag_service._load_data(self.rag_service.trade_log_path)
                 if trade_log_df is not None and not trade_log_df.empty:
-                    trading_days = pd.to_datetime(trade_log_df['Timestamp']).dt.date.nunique()
+                    trading_days = pd.to_datetime(
+                        trade_log_df['Timestamp'], utc=True
+                    ).dt.tz_localize(None).dt.date.nunique()
                     if trading_days >= rag_min_days:
                         logging.info(f"Sufficient historical data found ({trading_days} days). Activating RAG.")
                         rag_context = self.rag_service.retrieve_context_for_strategy_selection(todays_conditions)
@@ -142,20 +209,27 @@ class TradingBotOrchestrator:
             else:
                 logging.info("RAG is disabled in config.yaml.")
 
-            best_strategy_name = await self.langgraph_agent.get_recommended_strategy(todays_conditions, user_prompt, rag_context)
+            async with self.openai_lock:
+                best_strategy_name = await self.langgraph_agent.get_recommended_strategy(
+                    todays_conditions, user_prompt, rag_context
+                )
             
             self.active_strategy_name = best_strategy_name
             self.active_strategy = get_strategy(best_strategy_name, self.kite, self.config)
-            
-            initialize_trade_log()
-            
+
             token = self.order_agent.underlying_token
-            hist = await asyncio.to_thread(self.kite.historical_data, token, today - datetime.timedelta(days=7), today, "day")
+            hist = await self._fetch_price_history(
+                token,
+                self.config['trading_flags']['underlying_instrument'],
+                today - datetime.timedelta(days=7),
+                today,
+                "day",
+            )
             prev_day_data = pd.DataFrame(hist).iloc[-2:-1]
             self.position_agent.cpr_pivots = calculate_cpr(prev_day_data)
             
             self.bot_state = "AWAITING_SIGNAL"
-            self.awaiting_signal_since = datetime.datetime.now()
+            self.awaiting_signal_since = datetime.datetime.now(timezone.utc)
             logging.info(f"Setup complete. Active strategy: '{self.active_strategy.name}'. Waiting for signal...")
             return True
         except Exception as e:
@@ -179,9 +253,16 @@ class TradingBotOrchestrator:
             try:
                 # Fetch last day's NIFTY 50 data
                 token = self.order_agent.underlying_token
-                to_date = datetime.date.today()
+                ist = ZoneInfo("Asia/Kolkata")
+                to_date = datetime.datetime.now(ist).date()
                 from_date = to_date - datetime.timedelta(days=7) # Fetch a week to ensure we get the last trading day
-                hist_data = await asyncio.to_thread(self.kite.historical_data, token, from_date, to_date, "day")
+                hist_data = await self._fetch_price_history(
+                    token,
+                    self.config['trading_flags']['underlying_instrument'],
+                    from_date,
+                    to_date,
+                    "day",
+                )
                 
                 if hist_data:
                     last_day = hist_data[-1]
@@ -218,17 +299,18 @@ class TradingBotOrchestrator:
 
         if not await self.setup():
             logging.warning(f"Setup failed. Reason: {self.no_trade_reason or 'Unknown'}. Bot will exit.")
-            send_daily_report(self.config, str(datetime.date.today()), no_trades_reason=self.no_trade_reason)
+            ist = ZoneInfo("Asia/Kolkata")
+            send_daily_report(self.config, str(datetime.datetime.now(ist).date()), no_trades_reason=self.no_trade_reason)
             return
 
-        is_paper = self.config['trading_flags']['paper_trading']
+        is_paper = self.is_paper_trading
         logging.info(f"Bot running in {'PAPER TRADING' if is_paper else 'LIVE TRADING'} mode.")
 
         while self.is_market_open(): # Changed loop condition to re-check market status
             try:
                 if self.bot_state == "AWAITING_SIGNAL":
                     reassessment_period = self.config['trading_flags'].get('strategy_reassessment_period_minutes', 60)
-                    if self.awaiting_signal_since and (datetime.datetime.now() - self.awaiting_signal_since).total_seconds() > reassessment_period * 60:
+                    if self.awaiting_signal_since and (datetime.datetime.now(timezone.utc) - self.awaiting_signal_since).total_seconds() > reassessment_period * 60:
                         logging.warning(f"No trade signal for over {reassessment_period} minutes. Re-assessing strategy...")
                         if await self.setup():
                             continue
@@ -240,8 +322,15 @@ class TradingBotOrchestrator:
                         self.bot_state = "STOPPED"; continue
                     
                     token = self.order_agent.underlying_token
-                    hist_df = pd.DataFrame(await asyncio.to_thread(self.kite.historical_data, token, datetime.datetime.now() - datetime.timedelta(days=5), datetime.datetime.now(), self.config['trading_flags']['chart_timeframe']))
-                    hist_df['date'] = pd.to_datetime(hist_df['date'])
+                    hist_records = await self._fetch_price_history(
+                        token,
+                        self.config['trading_flags']['underlying_instrument'],
+                        datetime.datetime.now(timezone.utc) - datetime.timedelta(days=5),
+                        datetime.datetime.now(timezone.utc),
+                        self.config['trading_flags']['chart_timeframe'],
+                    )
+                    hist_df = pd.DataFrame(hist_records)
+                    hist_df['date'] = pd.to_datetime(hist_df['date'], utc=True).dt.tz_localize(None)
                     hist_df.set_index('date', inplace=True)
                     
                     day_df_for_status = calculate_all_indicators(hist_df.copy(), self.config)
@@ -260,34 +349,73 @@ class TradingBotOrchestrator:
                             
                             if getattr(self.active_strategy, 'is_reversal_trade', False) or is_primary_signal:
                                 logging.info(f"PRIMARY SIGNAL '{signal}' detected, proceeding with trade.")
-                                trade_details = await (self.order_agent.get_paper_trade_details(signal) if is_paper else self.order_agent.place_trade(signal))
+                                trade_details = await (
+                                    self.order_agent.get_paper_trade_details(signal)
+                                    if is_paper
+                                    else self.order_agent.place_trade(signal)
+                                )
                                 if trade_details:
                                     trade_details['Strategy'] = self.active_strategy_name
                                     self.position_agent.start_trade(trade_details)
+                                    desc = self.order_agent._describe_option_symbol(
+                                        trade_details['symbol']
+                                    )
+                                    logging.info(
+                                        f"Entered {desc} ({trade_details['symbol']}) at {trade_details['entry_price']:.2f} Qty: {trade_details['quantity']}"
+                                    )
+                                    log_trade(
+                                        {
+                                            'Timestamp': datetime.datetime.now(timezone.utc),
+                                            'OrderID': trade_details.get('order_id'),
+                                            'Symbol': trade_details['symbol'],
+                                            'TradeType': trade_details['type'],
+                                            'EntryPrice': trade_details['entry_price'],
+                                            'Quantity': trade_details['quantity'],
+                                            'Status': 'OPEN',
+                                            'Strategy': self.active_strategy_name,
+                                        }
+                                    )
                                     self.trades_today_count += 1
                                     self.bot_state = "IN_POSITION"
-                                    self.awaiting_signal_since = None 
+                                    self.awaiting_signal_since = None
                             else:
                                 logging.warning(f"COUNTER-SIGNAL DETECTED: A '{signal}' signal occurred when sentiment is '{self.day_sentiment}'.")
 
                 elif self.bot_state == "IN_POSITION":
                     token = self.order_agent.underlying_token
-                    underlying_df_hist = pd.DataFrame(await asyncio.to_thread(self.kite.historical_data, token, datetime.datetime.now() - datetime.timedelta(days=1), datetime.datetime.now(), self.config['trading_flags']['chart_timeframe']))
-                    underlying_df_hist['date'] = pd.to_datetime(underlying_df_hist['date'])
+                    underlying_records = await self._fetch_price_history(
+                        token,
+                        self.config['trading_flags']['underlying_instrument'],
+                        datetime.datetime.now(timezone.utc) - datetime.timedelta(days=1),
+                        datetime.datetime.now(timezone.utc),
+                        self.config['trading_flags']['chart_timeframe'],
+                    )
+                    underlying_df_hist = pd.DataFrame(underlying_records)
+                    underlying_df_hist['date'] = pd.to_datetime(
+                        underlying_df_hist['date'], utc=True
+                    ).dt.tz_localize(None)
                     underlying_df_hist.set_index('date', inplace=True)
                     underlying_df = calculate_all_indicators(underlying_df_hist, self.config)
-                    status = await self.position_agent.manage(is_paper, underlying_hist_df=underlying_df, sentiment_agent=self.sentiment_agent, gemini_api_key=self.config.get('google_api', {}).get('api_key'))
+                    status = await self.position_agent.manage(
+                        is_paper,
+                        underlying_hist_df=underlying_df,
+                        sentiment_agent=self.sentiment_agent,
+                        openai_client=self.openai_client,
+                        openai_lock=self.openai_lock,
+                    )
                     if status and status != 'ACTIVE':
                         log_trade(status)
+                        sync_holdings(self.kite)
                         self.bot_state = "AWAITING_SIGNAL"
-                        self.awaiting_signal_since = datetime.datetime.now()
+                        self.awaiting_signal_since = datetime.datetime.now(timezone.utc)
 
                 await asyncio.sleep(30)
             except Exception as e:
                 logging.error(f"Error in main loop: {e}", exc_info=True); await asyncio.sleep(60)
         
         logging.info("Market is now closed. Shutting down trading loop.")
-        today = datetime.date.today()
+        ist = ZoneInfo("Asia/Kolkata")
+        today = datetime.datetime.now(ist).date()
         send_daily_report(self.config, str(today), starting_capital=self.starting_capital)
         if today.day == calendar.monthrange(today.year, today.month)[1]:
             send_monthly_report(self.config, str(today))
